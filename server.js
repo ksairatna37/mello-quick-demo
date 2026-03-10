@@ -34,7 +34,7 @@ app.post("/api/chat", async (req, res) => {
     });
   }
 
-  const systemPrompt = process.env.MELLO_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+  const systemPrompt = process.env.MELLO_SYSTEM_PROMPT;
   const { messages, max_completion_tokens = 300 } = req.body ?? {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: "Invalid payload. 'messages' must be a non-empty array." });
