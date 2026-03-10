@@ -8,6 +8,7 @@ Investor demo frontend clone of the Mello chat interface.
 npm install
 cp .env.example .env
 # add server Azure vars: AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, AZURE_DEPLOYMENT_NAME, AZURE_API_VERSION
+# optional: MELLO_SYSTEM_PROMPT (server-side system instruction)
 # add browser voice vars: VITE_HUME_API_KEY and optional VITE_HUME_CONFIG_ID
 npm run dev
 ```

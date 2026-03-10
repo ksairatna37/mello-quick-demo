@@ -11,6 +11,8 @@ const port = Number(process.env.PORT || 3001);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distDir = path.join(__dirname, "dist");
+const DEFAULT_SYSTEM_PROMPT =
+  "You are Mello, a compassionate, trauma-informed mental health companion. Be empathetic, supportive, concise, and safety-first. Do not provide medical diagnosis. If user mentions self-harm or crisis, respond with care and encourage immediate professional help or crisis resources.";
 
 app.use(express.json({ limit: "1mb" }));
 
@@ -32,9 +34,19 @@ app.post("/api/chat", async (req, res) => {
     });
   }
 
+  const systemPrompt = process.env.MELLO_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
   const { messages, max_completion_tokens = 300 } = req.body ?? {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: "Invalid payload. 'messages' must be a non-empty array." });
+  }
+
+  const safeMessages = messages
+    .filter((msg) => msg && (msg.role === "user" || msg.role === "assistant"))
+    .map((msg) => ({ role: msg.role, content: String(msg.content ?? "") }))
+    .filter((msg) => msg.content.trim().length > 0);
+
+  if (safeMessages.length === 0) {
+    return res.status(400).json({ error: "Invalid payload. No valid chat messages found." });
   }
 
   try {
@@ -48,7 +60,7 @@ app.post("/api/chat", async (req, res) => {
         "api-key": azureApiKey,
       },
       body: JSON.stringify({
-        messages,
+        messages: [{ role: "system", content: systemPrompt }, ...safeMessages],
         max_completion_tokens,
       }),
     });
