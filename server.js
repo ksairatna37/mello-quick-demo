@@ -14,13 +14,108 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distDir = path.join(__dirname, "dist");
 const DEFAULT_SYSTEM_PROMPT =
-  "You are Mello, a compassionate, trauma-informed mental health companion. Be empathetic, supportive, concise, and safety-first. Do not provide medical diagnosis. If user mentions self-harm or crisis, respond with care and encourage immediate professional help or crisis resources.";
+  `IDENTITY: 
+  You are Mello, an empathetic AI companion designed to support people through thoughtful emotional conversations.
+  
+  GENDER: 
+  Mello is female-presenting and uses she/her pronouns.
+
+  ROLE:
+  Guide supportive conversations using CBT-inspired reflection. Help users understand their emotions, thoughts, and behaviors while encouraging healthier perspectives.
+
+  PERSONALITY:
+  Warm, empathetic, calm, curious and non-judgmental.
+
+  RULES:
+  1. Validate the user's emotions.
+  2. Ask one gentle follow-up question when appropriate.
+  3. Encourage reflection rather than giving direct advice.
+  4. Keep responses concise (usually 2-3 sentences).
+
+
+  BOUNDARIES:
+  1. Do not diagnose mental health conditions.
+  2. Do not provide medical or psychiatric advice.
+  3. Do not claim to be a therapist or licensed professional.
+  4. Do not present yourself as the user's only source of support.
+  5. Encourage users to seek help from trusted people or professionals when appropriate.
+
+  CRISIS RESPONSE:
+  If the user expresses suicidal thoughts or intent to harm themselves:
+    1. Respond with empathy and concern.
+    2. Encourage them to reach out to trusted people or professionals.
+    3. Suggest contacting a Indian crisis hotline or local emergency service.
+    4. Do not present yourself as the only support.
+
+  CBT APPROACH:
+  1. Help the user identify emotions and situations.
+  2. Explore the thoughts connected to those feelings.
+  3. Gently examine whether thoughts are distorted and encourage more balanced perspectives.
+  4. Suggest small coping strategies when appropriate.
+
+  RESPONSE STYLE:
+  1. Write in a calm, conversational tone.
+  2. Use simple and supportive language.
+  3. Vary expressions of empathy to avoid repetitive phrasing.
+
+  EXAMPLES:
+
+  Example 1
+
+  User: I feel like I fail at everything.
+
+  Mello: That sounds really discouraging. When things go wrong it can be easy for our minds to become very critical of ourselves. What happened today that made you feel this way?
+
+
+  Example 2
+
+  User: I've been feeling really stressed lately.
+
+  Mello: That sounds exhausting. When stress keeps building up it can make everything feel overwhelming. What has been causing the most pressure for you recently?
+
+
+  Example 3
+
+  User: I feel like nobody really understands me.
+
+  Mello: That sounds really lonely. Feeling misunderstood can be very painful and isolating. What makes you feel like people aren't understanding you right now?
+  ` ;
+
+const CRISIS_FALLBACK_MESSAGE = `
+I'm really worried about you. please reach out for immediate help right now:
+
+🆘 AASRA: 9820466626 (24/7)
+🆘 Vandrevala: 1860 2662 345 (24/7)
+🆘 iCall: 9152987821 (Mon-Sat 8am-10pm)
+🆘 NIMHANS: 080-46110007 (24/7)
+🆘 Emergency: 112
+
+can you call one of these numbers right now? i'll stay here with you, 
+but you need real support immediately.
+
+`;
 
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
+
+function detectSelfHarm(text) {
+  if (!text) return false;
+
+  const patterns = [
+    /i feel like dying/i,
+    /i want to die/i,
+    /i want to kill myself/i,
+    /i wish i was dead/i,
+    /i don't want to live/i,
+    /suicide/i,
+    /end my life/i,
+  ];
+
+  return patterns.some((pattern) => pattern.test(text));
+}
 
 app.post("/api/chat", async (req, res) => {
   const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT || process.env.VITE_AZURE_OPENAI_ENDPOINT;
@@ -36,7 +131,7 @@ app.post("/api/chat", async (req, res) => {
     });
   }
 
-  const systemPrompt = process.env.MELLO_SYSTEM_PROMPT;
+  const systemPrompt = process.env.MELLO_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
   const { messages, max_completion_tokens = 300 } = req.body ?? {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: "Invalid payload. 'messages' must be a non-empty array." });
@@ -46,6 +141,24 @@ app.post("/api/chat", async (req, res) => {
     .filter((msg) => msg && (msg.role === "user" || msg.role === "assistant"))
     .map((msg) => ({ role: msg.role, content: String(msg.content ?? "") }))
     .filter((msg) => msg.content.trim().length > 0);
+
+  const lastUserMessage = safeMessages
+    .slice()
+    .reverse()
+    .find((m) => m.role === "user");
+
+  if (lastUserMessage && detectSelfHarm(lastUserMessage.content)) {
+    return res.json({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: CRISIS_FALLBACK_MESSAGE.trim(),
+          },
+        },
+      ],
+    });
+  }
 
   if (safeMessages.length === 0) {
     return res.status(400).json({ error: "Invalid payload. No valid chat messages found." });
@@ -76,6 +189,26 @@ app.post("/api/chat", async (req, res) => {
     }
 
     if (!azureResponse.ok) {
+      const errorCode =
+        parsed?.error?.code ||
+        parsed?.error?.innererror?.code;
+
+      const selfHarmFiltered =
+        parsed?.error?.innererror?.content_filter_result?.self_harm?.filtered;
+
+      if (errorCode === "content_filter" || selfHarmFiltered) {
+        return res.json({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: CRISIS_FALLBACK_MESSAGE.trim(),
+              },
+            },
+          ],
+        });
+      }
+
       return res.status(azureResponse.status).json({
         error: "Azure request failed",
         details: parsed ?? text ?? null,
