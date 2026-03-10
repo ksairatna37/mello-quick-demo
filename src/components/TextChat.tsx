@@ -106,10 +106,7 @@ const TextChat = ({ onClose }: TextChatProps) => {
   const [isLoading, setIsLoading] = useState(false);
   const [messages, setMessages] = useState<DemoMessage[]>([]);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const azureEndpoint = import.meta.env.VITE_AZURE_OPENAI_ENDPOINT;
-  const azureApiKey = import.meta.env.VITE_AZURE_OPENAI_KEY;
-  const azureDeployment = import.meta.env.VITE_AZURE_DEPLOYMENT_NAME || "gpt-5.2-chat";
-  const azureApiVersion = import.meta.env.VITE_AZURE_API_VERSION || "2024-12-01-preview";
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "") || "";
 
   const initial = useMemo<DemoMessage>(
     () => ({
@@ -132,13 +129,6 @@ const TextChat = ({ onClose }: TextChatProps) => {
   }, [messages, isLoading]);
 
   const callAzureText = async (userMessage: string, history: DemoMessage[]) => {
-    if (!azureEndpoint || !azureApiKey) {
-      throw new Error("Missing Azure OpenAI config");
-    }
-
-    const cleanEndpoint = azureEndpoint.replace(/\/+$/, "");
-    const url = `${cleanEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`;
-
     const historicalMessages = history.slice(-20).map((msg) => ({
       role: msg.isUser ? "user" : "assistant",
       content: msg.text,
@@ -153,18 +143,20 @@ const TextChat = ({ onClose }: TextChatProps) => {
       max_completion_tokens: 300,
     };
 
-    const response = await fetch(url, {
+    const response = await fetch(`${apiBaseUrl}/api/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "api-key": azureApiKey,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        messages: payload.messages,
+        max_completion_tokens: payload.max_completion_tokens,
+      }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Azure request failed (${response.status}): ${errorText}`);
+      throw new Error(`Chat request failed (${response.status}): ${errorText}`);
     }
 
     const data = await response.json();
@@ -205,7 +197,7 @@ const TextChat = ({ onClose }: TextChatProps) => {
     } catch (error) {
       const aiEntry: DemoMessage = {
         id: uuidv4(),
-        text: "I could not reach Azure OpenAI. Check your Azure env values in `.env` and try again.",
+        text: "I could not reach the chat server. Check backend env values and try again.",
         isUser: false,
         timestamp: new Date().toISOString(),
       };
