@@ -49,10 +49,9 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const closingRef = useRef(false);
   const uiStateRef = useRef<VoiceUiState>("idle");
   const mediaMimeTypeRef = useRef<string>("");
-
-  const apiKey = import.meta.env.VITE_HUME_API_KEY;
-  const configId = import.meta.env.VITE_HUME_CONFIG_ID;
-  const hasConfig = Boolean(apiKey);
+  const wsBaseUrl =
+    import.meta.env.VITE_WS_BASE_URL?.replace(/\/+$/, "") ||
+    `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
 
   useEffect(() => {
     if (["connecting", "listening", "speaking"].includes(uiState)) {
@@ -371,19 +370,12 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   };
 
   const connect = async () => {
-    if (!hasConfig) return;
-
     closingRef.current = false;
     setSeconds(0);
     setMessages([]);
     setSessionState("connecting");
 
-    const params = new URLSearchParams({ api_key: apiKey, evi_version: "3" });
-    if (configId) {
-      params.set("config_id", configId);
-    }
-
-    const ws = new WebSocket(`wss://api.hume.ai/v0/evi/chat?${params.toString()}`);
+    const ws = new WebSocket(`${wsBaseUrl}/ws/voice`);
     wsRef.current = ws;
 
     ws.onopen = async () => {
@@ -405,7 +397,7 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
 
     ws.onerror = () => {
       setSessionState("error");
-      setErrorText("Could not connect to Hume EVI. Check your key/config and try again.");
+      setErrorText("Could not connect to voice server. Check backend voice config and try again.");
     };
 
     ws.onclose = () => {
@@ -453,12 +445,6 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
         <ArrowLeft />
       </Button>
 
-      {!hasConfig && (
-        <div className="mx-4 mt-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
-          Missing Hume config. Add `VITE_HUME_API_KEY` (and optional `VITE_HUME_CONFIG_ID`) in `.env`.
-        </div>
-      )}
-
       <div className="flex flex-1 flex-col items-center justify-between overflow-hidden py-4">
         <div className="pb-4 text-lg font-medium text-gray-700">{timerText}</div>
 
@@ -497,7 +483,7 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
           {uiState === "idle" || uiState === "error" ? (
             <Button
               onClick={connect}
-              disabled={!hasConfig || uiState === "connecting"}
+              disabled={uiState === "connecting"}
               className="rounded-full bg-white px-6 text-gray-700 hover:bg-gray-100"
               variant="outline"
             >

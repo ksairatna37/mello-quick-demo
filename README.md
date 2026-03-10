@@ -9,7 +9,8 @@ npm install
 cp .env.example .env
 # add server Azure vars: AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, AZURE_DEPLOYMENT_NAME, AZURE_API_VERSION
 # optional: MELLO_SYSTEM_PROMPT (server-side system instruction)
-# add browser voice vars: VITE_HUME_API_KEY and optional VITE_HUME_CONFIG_ID
+# add server voice vars: HUME_API_KEY and optional HUME_CONFIG_ID
+# optional frontend overrides: VITE_API_BASE_URL, VITE_WS_BASE_URL
 npm run dev
 ```
 
@@ -30,5 +31,4 @@ npm start
 
 - No auth
 - Backend added for text chat (`/api/chat`) so Azure key stays on server
-- No backend for voice mode (Hume key is still browser-side if enabled)
-- Voice chat connects directly to Hume EVI via browser WebSocket
+- Backend WebSocket proxy added for voice chat (`/ws/voice`) so Hume key stays on server

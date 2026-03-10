@@ -1,7 +1,9 @@
 import path from "node:path";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import express from "express";
+import { WebSocket, WebSocketServer } from "ws";
 
 dotenv.config();
 
@@ -95,6 +97,65 @@ app.get("/{*splat}", (_req, res) => {
   res.sendFile(path.join(distDir, "index.html"));
 });
 
-app.listen(port, () => {
+const server = createServer(app);
+const voiceWss = new WebSocketServer({ server, path: "/ws/voice" });
+
+voiceWss.on("connection", (clientWs) => {
+  const humeApiKey = process.env.HUME_API_KEY || process.env.VITE_HUME_API_KEY;
+  const humeConfigId = process.env.HUME_CONFIG_ID || process.env.VITE_HUME_CONFIG_ID;
+
+  if (!humeApiKey) {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify({ type: "error", message: "Missing HUME_API_KEY on server." }));
+    }
+    clientWs.close();
+    return;
+  }
+
+  const params = new URLSearchParams({ api_key: humeApiKey, evi_version: "3" });
+  if (humeConfigId) {
+    params.set("config_id", humeConfigId);
+  }
+
+  const upstreamWs = new WebSocket(`wss://api.hume.ai/v0/evi/chat?${params.toString()}`);
+
+  upstreamWs.on("message", (data, isBinary) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(data, { binary: isBinary });
+    }
+  });
+
+  upstreamWs.on("error", () => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify({ type: "error", message: "Failed to connect to Hume voice service." }));
+    }
+  });
+
+  upstreamWs.on("close", () => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close();
+    }
+  });
+
+  clientWs.on("message", (data, isBinary) => {
+    if (upstreamWs.readyState === WebSocket.OPEN) {
+      upstreamWs.send(data, { binary: isBinary });
+    }
+  });
+
+  clientWs.on("close", () => {
+    if (upstreamWs.readyState === WebSocket.OPEN || upstreamWs.readyState === WebSocket.CONNECTING) {
+      upstreamWs.close();
+    }
+  });
+
+  clientWs.on("error", () => {
+    if (upstreamWs.readyState === WebSocket.OPEN || upstreamWs.readyState === WebSocket.CONNECTING) {
+      upstreamWs.close();
+    }
+  });
+});
+
+server.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
