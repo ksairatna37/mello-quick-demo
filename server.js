@@ -81,6 +81,88 @@ const DEFAULT_SYSTEM_PROMPT =
   Mello: That sounds really lonely. Feeling misunderstood can be very painful and isolating. What makes you feel like people aren't understanding you right now?
   ` ;
 
+// Emotion response mapping for context injection
+const EMOTION_GUIDANCE = {
+  // Sad emotions → gentle, slow response
+  Sadness: "User sounds sad. Respond gently with a slower pace. Hold space for their feelings.",
+  Grief: "User is expressing grief. Be extra gentle, don't rush to fix anything.",
+  Disappointment: "User sounds disappointed. Validate this feeling before exploring.",
+
+  // Anxious emotions → grounding, calm
+  Anxiety: "User sounds anxious. Be grounding and steady. Offer to slow down together.",
+  Fear: "User sounds fearful. Provide calm reassurance. Don't add urgency.",
+  Distress: "User is in distress. Stay calm and present. Acknowledge how hard this is.",
+
+  // Angry emotions → validate first
+  Anger: "User sounds angry. Validate their anger first, don't minimize or rush to calm them.",
+  Frustration: "User is frustrated. Acknowledge the frustration before problem-solving.",
+  Annoyance: "User sounds annoyed. Acknowledge it briefly and adjust your approach.",
+
+  // Positive emotions → match energy
+  Joy: "User sounds joyful. Match their positive energy and enthusiasm.",
+  Excitement: "User is excited. Be engaged and curious about what's exciting them.",
+  Amusement: "User seems amused. It's okay to be lighter in tone.",
+
+  // Vulnerable emotions → extra warmth
+  Shame: "User may be feeling shame. Be extra warm and normalizing. No judgment.",
+  Embarrassment: "User sounds embarrassed. Normalize their experience gently.",
+  Guilt: "User may be feeling guilty. Help them explore without adding to the guilt.",
+
+  // Other important emotions
+  Confusion: "User sounds confused. Help them organize their thoughts step by step.",
+  Tiredness: "User sounds tired. Acknowledge their fatigue, keep responses brief.",
+  Loneliness: "User sounds lonely. Be extra present and warm in your response.",
+};
+
+// Get top N emotions above threshold from prosody scores
+function getTopEmotions(scores, count = 3, threshold = 0.4) {
+  if (!scores || typeof scores !== "object") return [];
+
+  return Object.entries(scores)
+    .filter(([, score]) => score >= threshold)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, count)
+    .map(([emotion, score]) => ({ emotion, score }));
+}
+
+// Build context injection based on detected emotions
+function buildEmotionContext(topEmotions) {
+  if (!topEmotions.length) return null;
+
+  const dominated = topEmotions[0];
+  const guidance = EMOTION_GUIDANCE[dominated.emotion];
+
+  if (!guidance) return null;
+
+  // Only inject for strong emotions (>0.5 confidence)
+  if (dominated.score < 0.5) return null;
+
+  const emotionList = topEmotions
+    .map(e => `${e.emotion} (${Math.round(e.score * 100)}%)`)
+    .join(", ");
+
+  return `Detected emotions: ${emotionList}. ${guidance}`;
+}
+
+// Patterns that indicate user is correcting themselves
+const CORRECTION_PATTERNS = [
+  /\bwait\b.*\bactually\b/i,
+  /\bno,?\s+i\s+mean(t)?\b/i,
+  /\bactually,?\s+no\b/i,
+  /\blet\s+me\s+(re)?phrase\b/i,
+  /\bsorry,?\s+(that'?s?\s+)?not\s+what\s+i\s+mean(t)?\b/i,
+  /\bi\s+mean,?\s+not\b/i,
+  /\bwait,?\s+no\b/i,
+  /\bhold\s+on,?\s+(actually|that'?s?\s+not)\b/i,
+  /\bwhat\s+i\s+mean(t)?\s+(is|was)\b/i,
+  /\bcorrection\b/i,
+];
+
+function detectCorrection(text) {
+  if (!text) return false;
+  return CORRECTION_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 const CRISIS_FALLBACK_MESSAGE = `
 I'm really worried about you. please reach out for immediate help right now:
 
@@ -253,8 +335,39 @@ voiceWss.on("connection", (clientWs) => {
   const upstreamWs = new WebSocket(`wss://api.hume.ai/v0/evi/chat?${params.toString()}`);
 
   upstreamWs.on("message", (data, isBinary) => {
+    // Forward message to client
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(data, { binary: isBinary });
+    }
+
+    // Inject emotion context for strong emotions only
+    if (!isBinary) {
+      try {
+        const event = JSON.parse(data.toString());
+        if (event.type === "user_message" && event.models?.prosody?.scores) {
+          const scores = event.models.prosody.scores;
+          const topEmotion = getTopEmotions(scores, 1, 0.7)[0]; // Only >0.7 confidence
+
+          if (topEmotion) {
+            const guidance = EMOTION_GUIDANCE[topEmotion.emotion];
+            if (guidance && upstreamWs.readyState === WebSocket.OPEN) {
+              // Keep context very short
+              const shortGuidance = guidance.split(".")[0]; // First sentence only
+              const contextMsg = {
+                type: "session_settings",
+                context: {
+                  text: shortGuidance,
+                  type: "temporary"
+                }
+              };
+              console.log(`[Emotion] ${topEmotion.emotion} (${Math.round(topEmotion.score * 100)}%) -> "${shortGuidance}"`);
+              upstreamWs.send(JSON.stringify(contextMsg));
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[Emotion injection error]", err.message);
+      }
     }
   });
 

@@ -26,6 +26,10 @@ interface DemoMessage {
   isUser: boolean;
 }
 
+// iOS devices often have quieter audio output; boost volume
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+const DEFAULT_GAIN = isIOS ? 2.0 : 1.0;
+
 const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const [uiState, setUiState] = useState<VoiceUiState>("idle");
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -43,6 +47,7 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const vadSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const vadRafRef = useRef<number | null>(null);
   const isPlayingRef = useRef(false);
+  const gainNodeRef = useRef<GainNode | null>(null);
   const userMutedRef = useRef(false);
   const isMicEnabledRef = useRef(true);
   const hasInterruptedTurnRef = useRef(false);
@@ -211,7 +216,8 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     const src = audioContext.createBufferSource();
     activeSourceRef.current = src;
     src.buffer = nextBuffer;
-    src.connect(audioContext.destination);
+    // Route through GainNode for volume control (iOS boost)
+    src.connect(gainNodeRef.current || audioContext.destination);
     src.onended = () => {
       activeSourceRef.current = null;
       playNextAudio();
@@ -226,6 +232,12 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
       }
       if (audioContextRef.current.state === "suspended") {
         await audioContextRef.current.resume();
+      }
+      // Initialize GainNode for volume boost (especially for iOS)
+      if (!gainNodeRef.current && audioContextRef.current) {
+        gainNodeRef.current = audioContextRef.current.createGain();
+        gainNodeRef.current.gain.value = DEFAULT_GAIN;
+        gainNodeRef.current.connect(audioContextRef.current.destination);
       }
       const bytes = Uint8Array.from(atob(base64Audio), (ch) => ch.charCodeAt(0));
       const decoded = await audioContextRef.current.decodeAudioData(bytes.buffer);
@@ -361,6 +373,11 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     wsRef.current = null;
     stopAssistantAudioPlayback();
     stopVadDetection();
+    // Cleanup GainNode
+    if (gainNodeRef.current) {
+      gainNodeRef.current.disconnect();
+      gainNodeRef.current = null;
+    }
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
