@@ -25,7 +25,7 @@ const TypewriterText: React.FC<TypewriterTextProps> = ({ text, speed = 25 }) => 
     setCurrentIndex(0);
   }, [text]);
 
-  return <span className="whitespace-pre-wrap text-sm sm:text-regular">{displayedText}</span>;
+  return <span className="whitespace-pre-wrap text-base sm:text-base md:text-lg tracking-tight md:tracking-normal leading-tight md:leading-normal font-[430] md:font-normal">{displayedText}</span>;
 };
 
 export default TypewriterText;
