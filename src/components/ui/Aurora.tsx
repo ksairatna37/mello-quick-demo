@@ -82,7 +82,7 @@ export default function Aurora({ colorStops = ["#00eaff", "#ffffff", "#00eaff"],
     const geometry = new Triangle(gl);
     delete (geometry.attributes as any).uv;
 
-    let program = new Program(gl, {
+    const program = new Program(gl, {
       vertex: VERT,
       fragment: FRAG,
       uniforms: {
@@ -126,7 +126,7 @@ export default function Aurora({ colorStops = ["#00eaff", "#ffffff", "#00eaff"],
       if (ctn.contains(gl.canvas)) ctn.removeChild(gl.canvas);
       gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
-  }, [amplitude, blend, colorStops]);
+  }, []);
 
   return <div ref={ctnDom} className="h-80 w-80" />;
 }
