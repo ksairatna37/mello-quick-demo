@@ -23,6 +23,8 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  const mediaDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioBuffer[]>([]);
   const isPlayingRef = useRef(false);
   const eviSpeakingRef = useRef(false);
@@ -57,7 +59,38 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     if (!gainNodeRef.current && audioCtxRef.current) {
       gainNodeRef.current = audioCtxRef.current.createGain();
       gainNodeRef.current.gain.value = isIOS ? IOS_GAIN : 1.0;
-      gainNodeRef.current.connect(audioCtxRef.current.destination);
+      // Route audio through a MediaStream destination and an HTMLAudioElement
+      // This lets us call setSinkId (when available) to prefer the loudspeaker
+      if (!mediaDestRef.current) {
+        mediaDestRef.current = audioCtxRef.current.createMediaStreamDestination();
+      }
+      gainNodeRef.current.connect(mediaDestRef.current);
+
+      // Create hidden audio element to play the MediaStream
+      if (!audioElRef.current) {
+        const a = document.createElement("audio");
+        a.autoplay = true;
+        try {
+          // prefer inline playback on iOS
+          (a as any).playsInline = true;
+        } catch (e) {
+          /* ignore */
+        }
+        a.style.display = "none";
+        a.srcObject = mediaDestRef.current.stream;
+        // Try to set sink ID to default (loudspeaker) when supported
+        const setSink = (a as any).setSinkId || (a as any).webkitSetSinkId;
+        if (setSink) {
+          try {
+            // 'default' is typically the speaker output; this may prompt permission in some browsers
+            (a as any).setSinkId?.("default");
+          } catch (e) {
+            // ignore if not allowed
+          }
+        }
+        document.body.appendChild(a);
+        audioElRef.current = a;
+      }
     }
   };
 
@@ -100,6 +133,7 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     // Route through GainNode for volume control (iOS boost)
+    // which is connected to a MediaStream destination + audio element
     src.connect(gainNodeRef.current || ctx.destination);
     src.onended = () => playNext();
     src.start(0);
@@ -272,8 +306,35 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     wsRef.current?.close();
     wsRef.current = null;
     // Cleanup audio
-    gainNodeRef.current?.disconnect();
+    try {
+      gainNodeRef.current?.disconnect();
+    } catch (e) {
+      /* ignore */
+    }
     gainNodeRef.current = null;
+
+    // Remove and stop the audio element playing the MediaStream
+    if (audioElRef.current) {
+      try {
+        audioElRef.current.pause();
+        // @ts-ignore
+        audioElRef.current.srcObject = null;
+        if (audioElRef.current.parentNode) audioElRef.current.parentNode.removeChild(audioElRef.current);
+      } catch (e) {
+        /* ignore */
+      }
+      audioElRef.current = null;
+    }
+
+    if (mediaDestRef.current) {
+      try {
+        mediaDestRef.current.stream.getTracks().forEach((t) => t.stop());
+      } catch (e) {
+        /* ignore */
+      }
+      mediaDestRef.current = null;
+    }
+
     audioCtxRef.current?.close();
     audioCtxRef.current = null;
     setState("idle");
@@ -305,9 +366,9 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
       </Button>
 
       <div className="flex flex-1 flex-col items-center justify-between overflow-hidden py-4">
-        <div className="pb-4 text-lg font-medium text-gray-700">{timerText}</div>
+        <div className="sm:pb-4 pb-10 text-lg font-medium text-gray-700">{timerText}</div>
 
-        <div className="flex h-72 w-72 items-center justify-center overflow-hidden rounded-full sm:h-[250px] sm:w-[250px]">
+        <div className="flex h-56 w-56 items-center justify-center overflow-hidden rounded-full sm:h-[250px] sm:w-[250px]">
           <div className="rotate-[3.35rad]">
             <Aurora
               colorStops={["#00eaff", "#00eaff", "#00eaff"]}
