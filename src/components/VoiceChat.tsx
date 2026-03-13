@@ -9,6 +9,10 @@ interface VoiceChatProps {
 }
 
 type VoiceState = "idle" | "connecting" | "listening" | "speaking" | "error";
+type AudioRoutingElement = HTMLAudioElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+  webkitSetSinkId?: (sinkId: string) => Promise<void>;
+};
 
 const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const [state, setState] = useState<VoiceState>("idle");
@@ -26,11 +30,13 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const mediaDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioBuffer[]>([]);
+  const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const isPlayingRef = useRef(false);
   const eviSpeakingRef = useRef(false);
 
   // iOS volume boost
   const isIOS = typeof navigator !== "undefined" && /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isMobile = typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   const IOS_GAIN = 2.5; // Boost volume on iOS
 
   // Timer
@@ -47,6 +53,78 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const configureMobileAudioSession = () => {
+    if (!isMobile || typeof navigator === "undefined") return;
+
+    const nav = navigator as Navigator & {
+      audioSession?: {
+        type?: string;
+      };
+    };
+
+    try {
+      if (nav.audioSession) {
+        // Mobile web cannot guarantee loudspeaker routing, but this preserves
+        // a single play-and-record session while Hume keeps continuous VAD.
+        nav.audioSession.type = "play-and-record";
+      }
+    } catch (e) {
+      console.warn("Audio session hint was rejected:", e);
+    }
+  };
+
+  const ensureAudioElementPlayback = async () => {
+    const audioEl = audioElRef.current;
+    if (!audioEl) return;
+
+    try {
+      await audioEl.play();
+    } catch (e) {
+      console.warn("Audio element playback could not be primed yet:", e);
+    }
+  };
+
+  const ensureAudioOutputElement = async () => {
+    const mediaDest = mediaDestRef.current;
+    if (!mediaDest) return null;
+
+    if (!audioElRef.current) {
+      const audioEl = document.createElement("audio") as AudioRoutingElement;
+      audioEl.autoplay = true;
+      audioEl.controls = false;
+      audioEl.preload = "auto";
+      audioEl.style.display = "none";
+      audioEl.srcObject = mediaDest.stream;
+      audioEl.setAttribute("playsinline", "true");
+      audioEl.setAttribute("webkit-playsinline", "true");
+      (audioEl as HTMLMediaElement & { disableRemotePlayback?: boolean }).disableRemotePlayback = true;
+
+      document.body.appendChild(audioEl);
+      audioElRef.current = audioEl;
+    }
+
+    if (audioElRef.current.srcObject !== mediaDest.stream) {
+      audioElRef.current.srcObject = mediaDest.stream;
+    }
+
+    if (isMobile) {
+      configureMobileAudioSession();
+    }
+
+    const audioEl = audioElRef.current as AudioRoutingElement;
+    const setSink = audioEl.setSinkId ?? audioEl.webkitSetSinkId;
+    if (setSink) {
+      try {
+        await setSink.call(audioEl, "default");
+      } catch (e) {
+        console.warn("setSinkId default routing was not allowed:", e);
+      }
+    }
+
+    await ensureAudioElementPlayback();
+    return audioElRef.current;
+  };
+
   // ─── Audio Playback (fixed for immediate playback) ───
   const initAudioContext = async () => {
     if (!audioCtxRef.current) {
@@ -55,48 +133,26 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     if (audioCtxRef.current.state === "suspended") {
       await audioCtxRef.current.resume();
     }
-    // Create GainNode for iOS volume boost
+
     if (!gainNodeRef.current && audioCtxRef.current) {
       gainNodeRef.current = audioCtxRef.current.createGain();
       gainNodeRef.current.gain.value = isIOS ? IOS_GAIN : 1.0;
-      // Route audio through a MediaStream destination and an HTMLAudioElement
-      // This lets us call setSinkId (when available) to prefer the loudspeaker
+
       if (!mediaDestRef.current) {
         mediaDestRef.current = audioCtxRef.current.createMediaStreamDestination();
       }
-      gainNodeRef.current.connect(mediaDestRef.current);
 
-      // Create hidden audio element to play the MediaStream
-      if (!audioElRef.current) {
-        const a = document.createElement("audio");
-        a.autoplay = true;
-        try {
-          // prefer inline playback on iOS
-          (a as any).playsInline = true;
-        } catch (e) {
-          /* ignore */
-        }
-        a.style.display = "none";
-        a.srcObject = mediaDestRef.current.stream;
-        // Try to set sink ID to default (loudspeaker) when supported
-        const setSink = (a as any).setSinkId || (a as any).webkitSetSinkId;
-        if (setSink) {
-          try {
-            // 'default' is typically the speaker output; this may prompt permission in some browsers
-            (a as any).setSinkId?.("default");
-          } catch (e) {
-            // ignore if not allowed
-          }
-        }
-        document.body.appendChild(a);
-        audioElRef.current = a;
-      }
+      gainNodeRef.current.connect(mediaDestRef.current);
     }
+
+    await ensureAudioOutputElement();
   };
 
   const enqueueAudio = (b64: string) => {
     const ctx = audioCtxRef.current;
     if (!ctx) return;
+
+    void ensureAudioElementPlayback();
 
     try {
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -119,6 +175,7 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const playNext = () => {
     const ctx = audioCtxRef.current;
     if (!ctx || audioQueueRef.current.length === 0) {
+      activeSourceRef.current = null;
       isPlayingRef.current = false;
       eviSpeakingRef.current = false;
       setState("listening");
@@ -131,11 +188,26 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
 
     const buffer = audioQueueRef.current.shift()!;
     const src = ctx.createBufferSource();
+    const gainNode = gainNodeRef.current;
     src.buffer = buffer;
-    // Route through GainNode for volume control (iOS boost)
-    // which is connected to a MediaStream destination + audio element
-    src.connect(gainNodeRef.current || ctx.destination);
-    src.onended = () => playNext();
+    if (!gainNode || !audioElRef.current) {
+      console.warn("Audio output path is not ready; dropping playback chunk.");
+      activeSourceRef.current = null;
+      isPlayingRef.current = false;
+      eviSpeakingRef.current = false;
+      setState("listening");
+      resumeMic();
+      return;
+    }
+
+    src.connect(gainNode);
+    activeSourceRef.current = src;
+    src.onended = () => {
+      if (activeSourceRef.current === src) {
+        activeSourceRef.current = null;
+      }
+      playNext();
+    };
     src.start(0);
   };
 
@@ -218,6 +290,14 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
         break;
       case "user_interruption":
         audioQueueRef.current = [];
+        if (activeSourceRef.current) {
+          try {
+            activeSourceRef.current.stop();
+          } catch (e) {
+            /* ignore */
+          }
+          activeSourceRef.current = null;
+        }
         isPlayingRef.current = false;
         eviSpeakingRef.current = false;
         setState("listening");
@@ -272,6 +352,7 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
       console.log("[Hume] Connected!");
       // Initialize AudioContext immediately (before audio arrives)
       await initAudioContext();
+      await ensureAudioElementPlayback();
       setState("listening");
       await startMic();
     };
@@ -303,6 +384,14 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     audioQueueRef.current = [];
     isPlayingRef.current = false;
     eviSpeakingRef.current = false;
+    if (activeSourceRef.current) {
+      try {
+        activeSourceRef.current.stop();
+      } catch (e) {
+        /* ignore */
+      }
+      activeSourceRef.current = null;
+    }
     wsRef.current?.close();
     wsRef.current = null;
     // Cleanup audio
@@ -317,7 +406,6 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     if (audioElRef.current) {
       try {
         audioElRef.current.pause();
-        // @ts-ignore
         audioElRef.current.srcObject = null;
         if (audioElRef.current.parentNode) audioElRef.current.parentNode.removeChild(audioElRef.current);
       } catch (e) {
