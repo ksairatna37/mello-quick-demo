@@ -1,6 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Mic, MicOff, RefreshCw } from "lucide-react";
-import { v4 as uuidv4 } from "uuid";
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, Mic, MicOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Aurora from "@/components/ui/Aurora";
 import ActionButton from "./ActionButton";
@@ -9,442 +8,285 @@ interface VoiceChatProps {
   onClose: () => void;
 }
 
-type VoiceUiState = "idle" | "connecting" | "listening" | "speaking" | "error";
-
-type HumeEvent =
-  | { type: "assistant_message"; message?: { content?: string } }
-  | { type: "user_message"; message?: { content?: string } }
-  | { type: "audio_output"; data: string }
-  | { type: "assistant_end" }
-  | { type: "user_interruption" }
-  | { type: "error"; message?: string }
-  | { type: string; [key: string]: unknown };
-
-interface DemoMessage {
-  id: string;
-  text: string;
-  isUser: boolean;
-}
-
-// iOS devices often have quieter audio output; boost volume
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-const DEFAULT_GAIN = isIOS ? 2.0 : 1.0;
+type VoiceState = "idle" | "connecting" | "listening" | "speaking" | "error";
 
 const VoiceChat = ({ onClose }: VoiceChatProps) => {
-  const [uiState, setUiState] = useState<VoiceUiState>("idle");
-  const [errorText, setErrorText] = useState<string | null>(null);
-  const [messages, setMessages] = useState<DemoMessage[]>([]);
+  const [state, setState] = useState<VoiceState>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<string>("");
   const [seconds, setSeconds] = useState(0);
-  const [isMicEnabled, setIsMicEnabled] = useState(true);
+  const [muted, setMuted] = useState(false);
 
+  // Simple refs - like Python HTML
   const wsRef = useRef<WebSocket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioQueueRef = useRef<AudioBuffer[]>([]);
-  const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const vadAnalyserRef = useRef<AnalyserNode | null>(null);
-  const vadSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const vadRafRef = useRef<number | null>(null);
-  const isPlayingRef = useRef(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
-  const userMutedRef = useRef(false);
-  const isMicEnabledRef = useRef(true);
-  const hasInterruptedTurnRef = useRef(false);
-  const closingRef = useRef(false);
-  const uiStateRef = useRef<VoiceUiState>("idle");
-  const mediaMimeTypeRef = useRef<string>("");
-  const wsBaseUrl =
-    import.meta.env.VITE_WS_BASE_URL?.replace(/\/+$/, "") ||
-    `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+  const audioQueueRef = useRef<AudioBuffer[]>([]);
+  const isPlayingRef = useRef(false);
+  const eviSpeakingRef = useRef(false);
 
+  // iOS volume boost
+  const isIOS = typeof navigator !== "undefined" && /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const IOS_GAIN = 2.5; // Boost volume on iOS
+
+  // Timer
   useEffect(() => {
-    if (["connecting", "listening", "speaking"].includes(uiState)) {
-      const timer = setInterval(() => setSeconds((prev) => prev + 1), 1000);
+    if (state === "listening" || state === "speaking") {
+      const timer = setInterval(() => setSeconds((s) => s + 1), 1000);
       return () => clearInterval(timer);
     }
-  }, [uiState]);
+  }, [state]);
 
+  // Cleanup on unmount
   useEffect(() => {
-    isMicEnabledRef.current = isMicEnabled;
-  }, [isMicEnabled]);
-
-  useEffect(() => {
-    return () => {
-      cleanupSession();
-    };
+    return () => disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const latestAIMessage = useMemo(() => {
-    return [...messages].reverse().find((item) => !item.isUser);
-  }, [messages]);
-
-  const setSessionState = (state: VoiceUiState) => {
-    uiStateRef.current = state;
-    setUiState(state);
-    if (state !== "error") {
-      setErrorText(null);
+  // ─── Audio Playback (fixed for immediate playback) ───
+  const initAudioContext = async () => {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new AudioContext();
+    }
+    if (audioCtxRef.current.state === "suspended") {
+      await audioCtxRef.current.resume();
+    }
+    // Create GainNode for iOS volume boost
+    if (!gainNodeRef.current && audioCtxRef.current) {
+      gainNodeRef.current = audioCtxRef.current.createGain();
+      gainNodeRef.current.gain.value = isIOS ? IOS_GAIN : 1.0;
+      gainNodeRef.current.connect(audioCtxRef.current.destination);
     }
   };
 
-  const blobToBase64 = (blob: Blob): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  };
+  const enqueueAudio = (b64: string) => {
+    const ctx = audioCtxRef.current;
+    if (!ctx) return;
 
-  const pauseMic = () => {
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.pause();
-    }
-  };
+    try {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      // Must copy buffer - decodeAudioData detaches the original
+      const buffer = bytes.buffer.slice(0);
 
-  const resumeMic = () => {
-    if (userMutedRef.current) return;
-    if (mediaRecorderRef.current?.state === "paused") {
-      mediaRecorderRef.current.resume();
-    }
-  };
-
-  const stopAssistantAudioPlayback = () => {
-    audioQueueRef.current = [];
-    isPlayingRef.current = false;
-    if (activeSourceRef.current) {
-      activeSourceRef.current.onended = null;
-      activeSourceRef.current.stop();
-      activeSourceRef.current.disconnect();
-      activeSourceRef.current = null;
-    }
-  };
-
-  const interruptAssistantForBargeIn = () => {
-    if (uiStateRef.current !== "speaking" || hasInterruptedTurnRef.current) return;
-    hasInterruptedTurnRef.current = true;
-    stopAssistantAudioPlayback();
-    setSessionState("listening");
-    resumeMic();
-  };
-
-  const stopVadDetection = () => {
-    if (vadRafRef.current !== null) {
-      cancelAnimationFrame(vadRafRef.current);
-      vadRafRef.current = null;
-    }
-    if (vadSourceRef.current) {
-      vadSourceRef.current.disconnect();
-      vadSourceRef.current = null;
-    }
-    if (vadAnalyserRef.current) {
-      vadAnalyserRef.current.disconnect();
-      vadAnalyserRef.current = null;
-    }
-  };
-
-  const startVadDetection = async (stream: MediaStream) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext();
-    }
-    if (audioContextRef.current.state === "suspended") {
-      await audioContextRef.current.resume();
-    }
-
-    stopVadDetection();
-
-    const analyser = audioContextRef.current.createAnalyser();
-    analyser.fftSize = 1024;
-    analyser.smoothingTimeConstant = 0.2;
-
-    const source = audioContextRef.current.createMediaStreamSource(stream);
-    source.connect(analyser);
-
-    vadAnalyserRef.current = analyser;
-    vadSourceRef.current = source;
-
-    const samples = new Float32Array(analyser.fftSize);
-    let voiceFrames = 0;
-    const threshold = 0.025;
-    const requiredFrames = 4;
-
-    const tick = () => {
-      const currentAnalyser = vadAnalyserRef.current;
-      if (!currentAnalyser) return;
-
-      currentAnalyser.getFloatTimeDomainData(samples);
-      let energy = 0;
-      for (let i = 0; i < samples.length; i += 1) {
-        energy += samples[i] * samples[i];
-      }
-      const rms = Math.sqrt(energy / samples.length);
-      const canInterrupt = uiStateRef.current === "speaking" && isMicEnabledRef.current && !userMutedRef.current;
-
-      if (canInterrupt && rms > threshold) {
-        voiceFrames += 1;
-        if (voiceFrames >= requiredFrames) {
-          interruptAssistantForBargeIn();
-          voiceFrames = 0;
+      ctx.decodeAudioData(buffer).then((decoded) => {
+        audioQueueRef.current.push(decoded);
+        if (!isPlayingRef.current) {
+          playNext();
         }
-      } else {
-        voiceFrames = 0;
-      }
-
-      vadRafRef.current = requestAnimationFrame(tick);
-    };
-
-    vadRafRef.current = requestAnimationFrame(tick);
+      }).catch((e) => {
+        console.warn("Audio decode error:", e);
+      });
+    } catch (e) {
+      console.warn("Audio error:", e);
+    }
   };
 
-  const playNextAudio = () => {
-    const audioContext = audioContextRef.current;
-    if (!audioContext) return;
-
-    const nextBuffer = audioQueueRef.current.shift();
-    if (!nextBuffer) {
+  const playNext = () => {
+    const ctx = audioCtxRef.current;
+    if (!ctx || audioQueueRef.current.length === 0) {
       isPlayingRef.current = false;
-      activeSourceRef.current = null;
-      if (uiStateRef.current !== "error") {
-        setSessionState("listening");
-      }
+      eviSpeakingRef.current = false;
+      setState("listening");
       resumeMic();
       return;
     }
 
     isPlayingRef.current = true;
-    const src = audioContext.createBufferSource();
-    activeSourceRef.current = src;
-    src.buffer = nextBuffer;
+    eviSpeakingRef.current = true;
+
+    const buffer = audioQueueRef.current.shift()!;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
     // Route through GainNode for volume control (iOS boost)
-    src.connect(gainNodeRef.current || audioContext.destination);
-    src.onended = () => {
-      activeSourceRef.current = null;
-      playNextAudio();
-    };
-    src.start();
+    src.connect(gainNodeRef.current || ctx.destination);
+    src.onended = () => playNext();
+    src.start(0);
   };
 
-  const enqueueAudio = async (base64Audio: string) => {
+  // ─── Microphone (like Python HTML - no VAD) ───
+  const startMic = async () => {
     try {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new AudioContext();
-      }
-      if (audioContextRef.current.state === "suspended") {
-        await audioContextRef.current.resume();
-      }
-      // Initialize GainNode for volume boost (especially for iOS)
-      if (!gainNodeRef.current && audioContextRef.current) {
-        gainNodeRef.current = audioContextRef.current.createGain();
-        gainNodeRef.current.gain.value = DEFAULT_GAIN;
-        gainNodeRef.current.connect(audioContextRef.current.destination);
-      }
-      const bytes = Uint8Array.from(atob(base64Audio), (ch) => ch.charCodeAt(0));
-      const decoded = await audioContextRef.current.decodeAudioData(bytes.buffer);
-      audioQueueRef.current.push(decoded);
-      if (!isPlayingRef.current) {
-        playNextAudio();
-      }
-    } catch {
-      setSessionState("error");
-      setErrorText("Audio playback failed. Please reconnect.");
-    }
-  };
-
-  const handleHumeEvent = async (event: HumeEvent) => {
-    switch (event.type) {
-      case "assistant_message": {
-        const text = event.message?.content?.trim();
-        if (text) {
-          setMessages((prev) => [...prev, { id: uuidv4(), text, isUser: false }]);
-          hasInterruptedTurnRef.current = false;
-          setSessionState("speaking");
-          pauseMic();
-        }
-        break;
-      }
-      case "user_message": {
-        const text = event.message?.content?.trim();
-        if (text) {
-          setMessages((prev) => [...prev, { id: uuidv4(), text, isUser: true }]);
-        }
-        break;
-      }
-      case "audio_output": {
-        if (event.data) {
-          await enqueueAudio(event.data);
-        }
-        break;
-      }
-      case "assistant_end": {
-        if (!audioQueueRef.current.length && !isPlayingRef.current) {
-          setSessionState("listening");
-          resumeMic();
-        }
-        break;
-      }
-      case "user_interruption": {
-        stopAssistantAudioPlayback();
-        hasInterruptedTurnRef.current = true;
-        setSessionState("listening");
-        resumeMic();
-        break;
-      }
-      case "error": {
-        setSessionState("error");
-        setErrorText(event.message || "Voice session error occurred.");
-        break;
-      }
-      default:
-        break;
-    }
-  };
-
-  const startMicrophone = async () => {
-    try {
-      if (typeof MediaRecorder === "undefined") {
-        setSessionState("error");
-        setErrorText("This mobile browser does not support live mic streaming. Use Chrome on Android or desktop.");
-        return;
-      }
-
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      micStreamRef.current = stream;
-      await startVadDetection(stream);
+      streamRef.current = stream;
 
-      const mimeCandidates = [
-        "audio/webm;codecs=opus",
-        "audio/webm",
-        "audio/ogg;codecs=opus",
-        "audio/mp4;codecs=mp4a.40.2",
-        "audio/mp4",
-        "audio/aac",
-      ];
-      const supportedMime = mimeCandidates.find((mime) => MediaRecorder.isTypeSupported(mime));
-      mediaMimeTypeRef.current = supportedMime || "";
+      const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]
+        .find((t) => MediaRecorder.isTypeSupported(t)) || "";
 
-      const recorder = new MediaRecorder(stream, supportedMime ? { mimeType: supportedMime } : undefined);
-      mediaRecorderRef.current = recorder;
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      recorderRef.current = recorder;
 
       recorder.ondataavailable = async ({ data }) => {
         if (!data || data.size === 0) return;
-        if (userMutedRef.current || uiStateRef.current === "speaking") return;
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        if (eviSpeakingRef.current || muted) return; // Don't send while EVI speaking
 
-        const base64 = await blobToBase64(data);
-        const payload: Record<string, string> = { type: "audio_input", data: base64 };
-        if (mediaMimeTypeRef.current) {
-          payload.mime_type = mediaMimeTypeRef.current;
-        }
-        wsRef.current.send(JSON.stringify(payload));
+        const b64 = await blobToBase64(data);
+        wsRef.current.send(JSON.stringify({ type: "audio_input", data: b64 }));
       };
 
-      recorder.start(100);
-    } catch (error) {
-      setSessionState("error");
-      const message = error instanceof Error ? error.message : "";
-      if (message.toLowerCase().includes("denied") || message.toLowerCase().includes("permission")) {
-        setErrorText("Microphone access was denied. Please allow mic access and reconnect.");
-      } else {
-        setErrorText("Could not initialize microphone on this browser/device. Try Chrome on Android or desktop.");
+      recorder.start(100); // 100ms chunks
+    } catch (e) {
+      setError("Microphone access denied. Please allow and retry.");
+      setState("error");
+    }
+  };
+
+  const pauseMic = () => {
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.pause();
+    }
+  };
+
+  const resumeMic = () => {
+    if (!muted && recorderRef.current?.state === "paused") {
+      recorderRef.current.resume();
+    }
+  };
+
+  const stopMic = () => {
+    recorderRef.current?.stop();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    recorderRef.current = null;
+    streamRef.current = null;
+  };
+
+  const blobToBase64 = (blob: Blob): Promise<string> => {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res((r.result as string).split(",")[1]);
+      r.onerror = rej;
+      r.readAsDataURL(blob);
+    });
+  };
+
+  // ─── Handle Hume Messages (like Python HTML) ───
+  const handleMessage = (msg: Record<string, unknown>) => {
+    switch (msg.type) {
+      case "user_message": {
+        const text = (msg.message as { content?: string })?.content;
+        if (text) setTranscript(text);
+        break;
       }
+      case "assistant_message": {
+        const text = (msg.message as { content?: string })?.content;
+        if (text) setTranscript(text);
+        setState("speaking");
+        pauseMic();
+        break;
+      }
+      case "audio_output":
+        enqueueAudio(msg.data as string);
+        break;
+      case "assistant_end":
+        // Queue will drain via playNext()
+        break;
+      case "user_interruption":
+        audioQueueRef.current = [];
+        isPlayingRef.current = false;
+        eviSpeakingRef.current = false;
+        setState("listening");
+        resumeMic();
+        break;
+      case "error":
+        setError((msg.message as string) || "Voice error occurred");
+        setState("error");
+        break;
     }
   };
 
-  const stopMicrophone = () => {
-    stopVadDetection();
-
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      mediaRecorderRef.current.stop();
-    }
-    mediaRecorderRef.current = null;
-
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((track) => track.stop());
-      micStreamRef.current = null;
-    }
-  };
-
-  const cleanupSession = () => {
-    stopMicrophone();
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.close();
-    }
-    wsRef.current = null;
-    stopAssistantAudioPlayback();
-    stopVadDetection();
-    // Cleanup GainNode
-    if (gainNodeRef.current) {
-      gainNodeRef.current.disconnect();
-      gainNodeRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    setIsMicEnabled(true);
-    userMutedRef.current = false;
-  };
-
+  // ─── Connect DIRECTLY to Hume (like Python HTML) ───
   const connect = async () => {
-    closingRef.current = false;
-    setSeconds(0);
-    setMessages([]);
-    setSessionState("connecting");
+    if (wsRef.current) return;
 
-    const ws = new WebSocket(`${wsBaseUrl}/ws/voice`);
+    setState("connecting");
+    setError(null);
+    setSeconds(0);
+    setTranscript("");
+
+    // Get credentials from server
+    let apiKey = "";
+    let configId = "";
+    try {
+      const resp = await fetch("/api/hume-token");
+      const data = await resp.json();
+      if (data.error) {
+        setError(data.error);
+        setState("error");
+        return;
+      }
+      apiKey = data.api_key;
+      configId = data.config_id || "";
+    } catch {
+      setError("Failed to get Hume credentials");
+      setState("error");
+      return;
+    }
+
+    // Connect directly to Hume (exactly like Python HTML)
+    let wsUrl = `wss://api.hume.ai/v0/evi/chat?api_key=${encodeURIComponent(apiKey)}&evi_version=3`;
+    if (configId) {
+      wsUrl += `&config_id=${encodeURIComponent(configId)}`;
+    }
+
+    console.log("[Hume] Connecting directly to Hume EVI...");
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = async () => {
-      await startMicrophone();
-      if (mediaRecorderRef.current) {
-        setSessionState("listening");
-      }
+      console.log("[Hume] Connected!");
+      // Initialize AudioContext immediately (before audio arrives)
+      await initAudioContext();
+      setState("listening");
+      await startMic();
     };
 
-    ws.onmessage = async ({ data }) => {
+    ws.onmessage = ({ data }) => {
       try {
-        const event = JSON.parse(data) as HumeEvent;
-        await handleHumeEvent(event);
-      } catch {
-        setSessionState("error");
-        setErrorText("Received invalid response from voice service.");
+        handleMessage(JSON.parse(data));
+      } catch (e) {
+        console.error("Parse error:", e);
       }
     };
 
     ws.onerror = () => {
-      setSessionState("error");
-      setErrorText("Could not connect to voice server. Check backend voice config and try again.");
+      console.error("[Hume] WebSocket error");
+      setError("Connection failed. Check API key and retry.");
+      setState("error");
     };
 
-    ws.onclose = () => {
-      stopMicrophone();
-      if (!closingRef.current) {
-        setSessionState("idle");
-      }
+    ws.onclose = (e) => {
+      console.log("[Hume] Disconnected:", e.code, e.reason);
+      stopMic();
+      if (state !== "error") setState("idle");
+      wsRef.current = null;
     };
   };
 
   const disconnect = () => {
-    closingRef.current = true;
-    cleanupSession();
-    setSessionState("idle");
+    stopMic();
+    audioQueueRef.current = [];
+    isPlayingRef.current = false;
+    eviSpeakingRef.current = false;
+    wsRef.current?.close();
+    wsRef.current = null;
+    // Cleanup audio
+    gainNodeRef.current?.disconnect();
+    gainNodeRef.current = null;
+    audioCtxRef.current?.close();
+    audioCtxRef.current = null;
+    setState("idle");
     setSeconds(0);
   };
 
-  const handleMicToggle = () => {
-    if (!mediaRecorderRef.current) return;
-
-    if (isMicEnabled) {
-      userMutedRef.current = true;
-      pauseMic();
-      setIsMicEnabled(false);
+  const toggleMute = () => {
+    if (muted) {
+      setMuted(false);
+      resumeMic();
     } else {
-      userMutedRef.current = false;
-      if (uiState !== "speaking") {
-        resumeMic();
-      }
-      setIsMicEnabled(true);
+      setMuted(true);
+      pauseMic();
     }
   };
 
@@ -453,7 +295,7 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
     onClose();
   };
 
-  const amplitude = uiState === "speaking" ? 1 : 0.45;
+  const amplitude = state === "speaking" ? 1 : 0.45;
   const timerText = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 
   return (
@@ -471,60 +313,56 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
               colorStops={["#00eaff", "#00eaff", "#00eaff"]}
               blend={0.5}
               amplitude={amplitude}
-              speed={uiState === "speaking" ? 2 : 0.35}
+              speed={state === "speaking" ? 2 : 0.35}
             />
           </div>
         </div>
 
-        <div className="mt-4 flex flex-1 items-center overflow-y-auto text-center">
-          {!isMicEnabled && uiState !== "idle" ? (
-            <div className="rounded-2xl py-2 text-gray-500">
-              Psst... <span className="text-red-500">unmute</span> so <span className="handwriting-font">mello</span> can hear you
-            </div>
-          ) : latestAIMessage ? (
-            <div className="max-w-[100%] rounded-xl p-2 text-left text-sm text-gray-800 sm:p-4 sm:text-base">{latestAIMessage.text}</div>
-          ) : (
-            <div className="rounded-2xl py-2 text-gray-500">
-              <span className="handwriting-font">mello</span>
-              <span className="text-[#758bfd]"> listening </span>
-              so say what is on your mind
-            </div>
-          )}
+        <div className="mt-4 flex w-full flex-1 items-center justify-center px-4 sm:px-8">
+          <div className="max-w-sm text-center sm:max-w-md">
+            {muted && state !== "idle" ? (
+              <div className="rounded-2xl py-2 text-gray-500">
+                Psst... <span className="text-red-500">unmute</span> so <span className="handwriting-font">mello</span> can hear you
+              </div>
+            ) : transcript ? (
+              <div className="text-base leading-relaxed text-gray-800 sm:text-lg">{transcript}</div>
+            ) : (
+              <div className="rounded-2xl py-2 text-gray-500">
+                <span className="handwriting-font">mello</span>
+                <span className="text-[#758bfd]"> listening </span>
+                so say what is on your mind
+              </div>
+            )}
+          </div>
         </div>
 
-        {errorText && (
-          <div className="mt-2 rounded-md bg-red-100 px-3 py-2 text-sm text-red-600">{errorText}</div>
+        {error && (
+          <div className="mt-2 rounded-md bg-red-100 px-3 py-2 text-sm text-red-600">{error}</div>
         )}
 
         <div className="mb-4 mt-4 flex w-full items-center justify-center gap-3">
-          {uiState === "idle" || uiState === "error" ? (
+          {state === "idle" || state === "error" || state === "connecting" ? (
             <Button
               onClick={connect}
-              disabled={uiState === "connecting"}
+              disabled={state === "connecting"}
               className="rounded-full bg-white px-6 text-gray-700 hover:bg-gray-100"
               variant="outline"
             >
-              {uiState === "connecting" ? "Connecting..." : "Connect Voice"}
+              {state === "connecting" ? "Connecting..." : "Connect Voice"}
             </Button>
           ) : (
             <>
               <ActionButton
                 type="button"
-                variant={isMicEnabled ? "primary" : "outline"}
-                onClick={handleMicToggle}
+                variant={muted ? "outline" : "primary"}
+                onClick={toggleMute}
                 className="h-16 w-16 border border-solid border-[#cccac6] shadow-lg"
-                icon={isMicEnabled ? <Mic className="h-8 w-8 text-[#758bfd]" /> : <MicOff className="h-8 w-8 text-red-500" />}
+                icon={muted ? <MicOff className="h-8 w-8 text-red-500" /> : <Mic className="h-8 w-8 text-[#758bfd]" />}
               />
-              <Button variant="outline" className="rounded-full" onClick={disconnect}>
+              <Button variant="outline" className="rounded-full" onClick={handleBack}>
                 End
               </Button>
             </>
-          )}
-
-          {uiState === "error" && (
-            <Button variant="ghost" className="rounded-full" onClick={connect}>
-              <RefreshCw className="mr-2 h-4 w-4" /> Retry
-            </Button>
           )}
         </div>
       </div>
