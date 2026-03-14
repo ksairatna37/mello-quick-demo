@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useVoice, VoiceReadyState } from "@humeai/voice-react";
 import { ArrowLeft, Mic, MicOff } from "lucide-react";
+import { useHumeIntervention } from "@/components/HumeInterventionContext";
 import { Button } from "@/components/ui/button";
 import Aurora from "@/components/ui/Aurora";
 import ActionButton from "./ActionButton";
@@ -16,12 +17,8 @@ type HumeAuthResponse = {
   configId?: string;
 };
 
-type DebugEntry = {
-  id: number;
-  message: string;
-};
-
 const VoiceChat = ({ onClose }: VoiceChatProps) => {
+  const { currentIntervention } = useHumeIntervention();
   const {
     connect,
     disconnect,
@@ -42,24 +39,10 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string>("");
   const [seconds, setSeconds] = useState(0);
-  const [debugEntries, setDebugEntries] = useState<DebugEntry[]>([]);
   const lastTranscriptRef = useRef("");
-  const debugFlushTimeoutRef = useRef<number | null>(null);
-  const debugBufferRef = useRef<DebugEntry[]>([]);
 
   const pushDebug = (message: string) => {
     console.log(message);
-    debugBufferRef.current.push({ id: Date.now() + Math.random(), message });
-
-    if (debugFlushTimeoutRef.current !== null) {
-      return;
-    }
-
-    debugFlushTimeoutRef.current = window.setTimeout(() => {
-      setDebugEntries((current) => [...current, ...debugBufferRef.current].slice(-12));
-      debugBufferRef.current = [];
-      debugFlushTimeoutRef.current = null;
-    }, 250);
   };
 
   console.log("[VoiceChat] render", {
@@ -176,6 +159,12 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
       await connect({
         auth: { type: "apiKey", value: auth.apiKey },
         configId: auth.configId,
+        sessionSettings: {
+          type: "session_settings",
+          variables: {
+            intervention_guidance: "",
+          },
+        },
       });
       pushDebug("[VoiceChat] Hume connect resolved");
     } catch (connectError) {
@@ -222,67 +211,69 @@ const VoiceChat = ({ onClose }: VoiceChatProps) => {
   const timerText = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
   const showConnectButton =
     state === "idle" || state === "error" || readyState === VoiceReadyState.CONNECTING || readyState === VoiceReadyState.CLOSED;
-
-  useEffect(() => {
-    return () => {
-      if (debugFlushTimeoutRef.current !== null) {
-        window.clearTimeout(debugFlushTimeoutRef.current);
-      }
-    };
-  }, []);
+  const hasLongTranscript = transcript.length > 180;
+  const hasVeryLongTranscript = transcript.length > 320;
+  const transcriptClassName = hasVeryLongTranscript
+    ? "text-sm leading-7 text-gray-800 sm:text-base"
+    : hasLongTranscript
+      ? "text-sm leading-7 text-gray-800 sm:text-lg"
+      : "text-base leading-relaxed text-gray-800 sm:text-lg";
 
   return (
-    <div className="mx-auto flex h-[80vh] w-full flex-col rounded-2xl bg-white p-2 sm:min-w-4xl sm:max-w-4xl sm:p-0">
-      <Button onClick={() => void handleBack()} variant="ghost" size="icon" className="text-gray-500 hover:text-gray-700">
-        <ArrowLeft />
-      </Button>
+    <div className="relative mx-auto flex min-h-[80vh] w-full flex-col overflow-hidden rounded-2xl bg-white p-2 sm:min-h-[84vh] sm:min-w-4xl sm:max-w-4xl sm:p-0">
+      <div className="shrink-0 px-1 pt-1 sm:px-3 sm:pt-3">
+        <Button onClick={() => void handleBack()} variant="ghost" size="icon" className="text-gray-500 hover:text-gray-700">
+          <ArrowLeft />
+        </Button>
+      </div>
 
-      <div className="flex flex-1 flex-col items-center justify-between overflow-hidden py-4">
-        <div className="pb-10 text-lg font-medium text-gray-700 sm:pb-4">{timerText}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pb-3 pt-2 sm:px-8 sm:pb-5">
+        <div className="shrink-0 pb-3 text-center text-base font-medium text-gray-700 sm:pb-2 sm:text-lg">{timerText}</div>
 
-        <div className="flex h-56 w-56 shrink-0 items-center justify-center overflow-hidden rounded-full sm:h-[250px] sm:w-[250px]">
-          <div className="rotate-[3.35rad]">
-            <Aurora
-              colorStops={["#00eaff", "#00eaff", "#00eaff"]}
-              blend={0.5}
-              amplitude={amplitude}
-              speed={state === "speaking" ? 2 : 0.35}
-            />
+        <div className="flex shrink-0 justify-center">
+          <div className="flex h-36 w-36 items-center justify-center overflow-hidden rounded-full sm:h-[220px] sm:w-[220px]">
+            <div className="rotate-[3.35rad]">
+              <Aurora
+                colorStops={["#00eaff", "#00eaff", "#00eaff"]}
+                blend={0.5}
+                amplitude={amplitude}
+                speed={state === "speaking" ? 2 : 0.35}
+              />
+            </div>
           </div>
         </div>
 
-        <div className="mt-4 flex w-full flex-1 items-center justify-center px-4 sm:px-8">
-          <div className="max-w-sm text-center sm:max-w-md">
-            {isMuted && readyState === VoiceReadyState.OPEN ? (
-              <div className="rounded-2xl py-2 text-gray-500">
-                Psst... <span className="text-red-500">unmute</span> so <span className="handwriting-font">mello</span> can hear you
-              </div>
-            ) : transcript ? (
-              <div className="text-base leading-relaxed text-gray-800 sm:text-lg">{transcript}</div>
-            ) : (
-              <div className="rounded-2xl py-2 text-gray-500">
-                <span className="handwriting-font">mello</span>
-                <span className="text-[#758bfd]"> listening </span>
-                so say what is on your mind
+        <div className="mt-3 flex flex-1 flex-col justify-center">
+          <div className="flex flex-1 items-center justify-center px-1 py-1">
+            <div className="max-w-sm text-center sm:max-w-md lg:max-w-lg">
+              {isMuted && readyState === VoiceReadyState.OPEN ? (
+                <div className="rounded-2xl py-2 text-gray-500">
+                  Psst... <span className="text-red-500">unmute</span> so <span className="handwriting-font">mello</span> can hear you
+                </div>
+              ) : transcript ? (
+                <div className={transcriptClassName}>{transcript}</div>
+              ) : (
+                <div className="rounded-2xl py-2 text-gray-500">
+                  <span className="handwriting-font">mello</span>
+                  <span className="text-[#758bfd]"> listening </span>
+                  so say what is on your mind
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="shrink-0 pt-1">
+            {error && <div className="mx-auto max-w-md rounded-md bg-red-100 px-3 py-2 text-center text-sm text-red-600">{error}</div>}
+
+            {currentIntervention && readyState === VoiceReadyState.OPEN && (
+              <div className="mx-auto mt-2 w-fit rounded-full bg-sky-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-sky-700 sm:text-xs">
+                Active guidance: {currentIntervention.type.replace(/_/g, " ")}
               </div>
             )}
           </div>
         </div>
 
-        {error && <div className="mt-2 rounded-md bg-red-100 px-3 py-2 text-sm text-red-600">{error}</div>}
-
-        {/* <div className="mt-2 w-full max-w-xl rounded-xl bg-black px-3 py-2 text-left text-xs text-white">
-          <div className="mb-2 font-medium text-white/80">Debug Log</div>
-          <div className="max-h-32 space-y-1 overflow-y-auto font-mono">
-            {debugEntries.length === 0 ? (
-              <div className="text-white/60">No debug events yet</div>
-            ) : (
-              debugEntries.map((entry) => <div key={entry.id}>{entry.message}</div>)
-            )}
-          </div>
-        </div> */}
-
-        <div className="mb-4 mt-4 flex w-full items-center justify-center gap-3">
+        <div className="mt-3 flex shrink-0 items-center justify-center gap-3 border-t border-slate-100 bg-white/95 pt-3">
           {showConnectButton ? (
             <Button
               onClick={() => void connectVoice()}

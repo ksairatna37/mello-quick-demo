@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { VoiceProvider } from "@humeai/voice-react";
 import App from "./App";
+import HumeVoiceProvider from "@/components/HumeVoiceProvider";
 import "./index.css";
 
 const userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent;
@@ -10,8 +10,8 @@ const isSafari = /Safari/.test(userAgent) && !/Chrome|CriOS|EdgiOS|FxiOS/.test(u
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <VoiceProvider enableAudioWorklet={!(isIOS || isSafari)}>
+    <HumeVoiceProvider enableAudioWorklet={!(isIOS || isSafari)}>
       <App />
-    </VoiceProvider>
+    </HumeVoiceProvider>
   </React.StrictMode>,
 );
