@@ -1,0 +1,56 @@
+name: Build and Deploy Hindi Agent
+
+on:
+  push:
+    branches: [main, feature/sarvamai]
+    paths:
+      - 'sarvam_hindi_agent/**'
+  workflow_dispatch:  # Manual trigger
+
+env:
+  REGISTRY: mellosarvam.azurecr.io
+  IMAGE_NAME: mello-hindi-agent
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./sarvam_hindi_agent
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Image digest
+        run: echo "Image pushed successfully!"
+
+  deploy-to-container-app:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Container App
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          resourceGroup: rg-degensid-7474_ai
+          containerAppName: mello-hindi-agent
+          imageToDeploy: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}

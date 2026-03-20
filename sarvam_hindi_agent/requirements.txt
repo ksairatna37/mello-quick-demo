@@ -1,0 +1,9 @@
+# Pipecat Voice Agent with LiveKit transport
+pipecat-ai[sarvam,azure,livekit]
+python-dotenv
+loguru
+
+# Token server
+fastapi
+uvicorn
+livekit-api
