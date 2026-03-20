@@ -16,8 +16,9 @@ from livekit import api
 parent_env = Path(__file__).parent.parent / ".env"
 load_dotenv(parent_env, override=True)
 
-from pipecat.frames.frames import LLMMessagesFrame, EndFrame, TextFrame
+from pipecat.frames.frames import LLMMessagesFrame, EndFrame, TextFrame, TranscriptionFrame, InterimTranscriptionFrame
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
+import json
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -198,10 +199,19 @@ async def main(room_name: str):
         params=PipelineParams(allow_interruptions=True)
     )
 
-    @transport.event_handler("on_first_participant_joined")
-    async def on_first_participant_joined(transport, participant):
-        logger.info(f"User connected: {participant}")
-        # Greet the user in Hindi
+    @transport.event_handler("on_participant_joined")
+    async def on_participant_joined(transport, participant):
+        # Skip if it's the agent itself joining
+        if participant.identity == "mello-hindi-agent":
+            return
+
+        logger.info(f"User connected: {participant.identity}")
+
+        # Reset conversation for new user
+        messages.clear()
+        messages.append({"role": "system", "content": MELLO_HINDI_SYSTEM_PROMPT})
+
+        # Greet the new user in Hindi
         messages.append({
             "role": "user",
             "content": "Greet me warmly in Hindi and ask how I'm doing today."
@@ -210,8 +220,14 @@ async def main(room_name: str):
 
     @transport.event_handler("on_participant_left")
     async def on_participant_left(transport, participant, reason):
-        logger.info(f"User disconnected: {participant}, reason: {reason}")
-        await task.queue_frames([EndFrame()])
+        # Skip if it's the agent itself
+        if participant.identity == "mello-hindi-agent":
+            return
+
+        logger.info(f"User disconnected: {participant.identity}, reason: {reason}")
+        # Don't end pipeline - just reset and wait for next user
+        messages.clear()
+        messages.append({"role": "system", "content": MELLO_HINDI_SYSTEM_PROMPT})
 
     runner = PipelineRunner()
 
