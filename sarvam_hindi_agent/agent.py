@@ -199,33 +199,62 @@ async def main(room_name: str):
         params=PipelineParams(allow_interruptions=True)
     )
 
-    @transport.event_handler("on_participant_joined")
-    async def on_participant_joined(transport, participant):
-        # Skip if it's the agent itself joining
-        if participant.identity == "mello-hindi-agent":
-            return
+    # Track if we've greeted the current user
+    greeted = {"value": False}
 
-        logger.info(f"User connected: {participant.identity}")
+    @transport.event_handler("on_first_participant_joined")
+    async def on_first_participant_joined(transport, participant):
+        """Handle first user joining - greet them"""
+        logger.info(f"First user connected: {participant}")
+        greeted["value"] = True
 
-        # Reset conversation for new user
-        messages.clear()
-        messages.append({"role": "system", "content": MELLO_HINDI_SYSTEM_PROMPT})
-
-        # Greet the new user in Hindi
+        # Greet the user in Hindi
         messages.append({
             "role": "user",
             "content": "Greet me warmly in Hindi and ask how I'm doing today."
         })
         await task.queue_frames([LLMMessagesFrame(messages)])
 
-    @transport.event_handler("on_participant_left")
-    async def on_participant_left(transport, participant, reason):
+    @transport.event_handler("on_participant_joined")
+    async def on_participant_joined(transport, participant):
+        """Handle any participant joining (for reconnections)"""
+        # Get identity safely
+        identity = getattr(participant, 'identity', str(participant))
+
         # Skip if it's the agent itself
-        if participant.identity == "mello-hindi-agent":
+        if "mello-hindi-agent" in str(identity):
             return
 
-        logger.info(f"User disconnected: {participant.identity}, reason: {reason}")
-        # Don't end pipeline - just reset and wait for next user
+        logger.info(f"Participant joined: {identity}")
+
+        # If we haven't greeted yet (reconnection case), greet now
+        if not greeted["value"]:
+            greeted["value"] = True
+
+            # Reset conversation for new user
+            messages.clear()
+            messages.append({"role": "system", "content": MELLO_HINDI_SYSTEM_PROMPT})
+
+            # Greet the new user
+            messages.append({
+                "role": "user",
+                "content": "Greet me warmly in Hindi and ask how I'm doing today."
+            })
+            await task.queue_frames([LLMMessagesFrame(messages)])
+
+    @transport.event_handler("on_participant_left")
+    async def on_participant_left(transport, participant, reason):
+        """Handle participant leaving - reset for next user"""
+        identity = getattr(participant, 'identity', str(participant))
+
+        # Skip if it's the agent itself
+        if "mello-hindi-agent" in str(identity):
+            return
+
+        logger.info(f"User disconnected: {identity}, reason: {reason}")
+
+        # Reset state for next user
+        greeted["value"] = False
         messages.clear()
         messages.append({"role": "system", "content": MELLO_HINDI_SYSTEM_PROMPT})
 
