@@ -52,5 +52,5 @@ jobs:
         uses: azure/container-apps-deploy-action@v1
         with:
           resourceGroup: rg-degensid-7474_ai
-          containerAppName: mello-hindi-agent
+          containerAppName: mello-hindi-agent-in
           imageToDeploy: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
