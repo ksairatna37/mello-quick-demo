@@ -114,12 +114,12 @@ const EnglishVoiceChat = ({ onClose, onBack, language, setLanguage }: EnglishVoi
       const data = (await response.json()) as HumeAuthResponse | { error?: string };
 
       if (!response.ok || !("apiKey" in data) || !data.apiKey) {
-        throw new Error(("error" in data && data.error) || "Failed to get Hume auth.");
+        throw new Error(("error" in data && data.error) || "Failed to authenticate voice service.");
       }
 
       auth = data;
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Failed to get Hume auth.");
+      setError(requestError instanceof Error ? requestError.message : "Failed to authenticate voice service.");
       setState("error");
       return;
     }
@@ -136,8 +136,8 @@ const EnglishVoiceChat = ({ onClose, onBack, language, setLanguage }: EnglishVoi
         },
       });
     } catch (connectError) {
-      console.error("[EnglishVoiceChat] Hume connect failed", connectError);
-      setError(connectError instanceof Error ? connectError.message : "Failed to connect to Hume.");
+      console.error("[EnglishVoiceChat] Voice connect failed", connectError);
+      setError(connectError instanceof Error ? connectError.message : "Failed to connect to voice service.");
       setState("error");
     }
   };

@@ -1,12 +1,12 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
-  useVoiceAssistant,
   useRoomContext,
   useConnectionState,
+  useParticipants,
 } from "@livekit/components-react";
-import { ConnectionState } from "livekit-client";
+import { ConnectionState, RoomEvent } from "livekit-client";
 import { ArrowLeft, Mic, MicOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Aurora from "@/components/ui/Aurora";
@@ -115,7 +115,7 @@ const HindiVoiceChat = ({ onClose, onBack, language, setLanguage }: HindiVoiceCh
             token={connectionData.token}
             serverUrl={connectionData.serverUrl}
             connect={true}
-            audio={true}
+            audio={{ echoCancellation: true, noiseSuppression: true, autoGainControl: true }}
             video={false}
             onDisconnected={disconnectVoice}
             onError={(err) => {
@@ -152,7 +152,7 @@ const HindiVoiceChat = ({ onClose, onBack, language, setLanguage }: HindiVoiceCh
                   <div className="rounded-2xl py-2 text-gray-500">
                     <span className="handwriting-font">mello</span> Hindi voice
                     <br />
-                    <span className="text-sm text-gray-400">Powered by Sarvam AI</span>
+                    <span className="text-sm text-gray-400">Hindi voice assistant</span>
                   </div>
                 </div>
               </div>
@@ -219,12 +219,79 @@ interface HindiVoiceUIProps {
 const HindiVoiceUI = ({ seconds, setSeconds, error, onClose }: HindiVoiceUIProps) => {
   const room = useRoomContext();
   const connectionState = useConnectionState();
-  const { state: assistantState, audioTrack } = useVoiceAssistant();
+  const participants = useParticipants();
   const [isMuted, setIsMuted] = useState(false);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [agentConnected, setAgentConnected] = useState(false);
+  const [botTranscript, setBotTranscript] = useState<string>("");
 
   const isRoomConnected = connectionState === ConnectionState.Connected;
   const isRoomConnecting = connectionState === ConnectionState.Connecting;
 
+  // Find the agent participant (identity contains "mello-hindi-agent")
+  const agentParticipant = participants.find(p =>
+    p.identity.includes("mello-hindi-agent") || p.identity.includes("agent")
+  );
+
+  // Track agent connection
+  useEffect(() => {
+    if (agentParticipant) {
+      console.log("[HindiVoice] Agent connected:", agentParticipant.identity);
+      setAgentConnected(true);
+    }
+  }, [agentParticipant]);
+
+  // Handle RTVI transcript messages from Pipecat agent
+  useEffect(() => {
+    if (!room || !isRoomConnected) return;
+
+    const handleDataReceived = (payload: Uint8Array) => {
+      try {
+        const decoder = new TextDecoder();
+        const message = JSON.parse(decoder.decode(payload));
+
+        const rtviType = message.type;
+        const text = message.data?.text;
+
+        // Bot transcription - replace with full message (not append)
+        if (rtviType === "bot-transcription" && text) {
+          console.log("[HindiVoice] Bot transcript:", text);
+          setBotTranscript(text);
+        }
+
+        // Bot started speaking - clear transcript for new utterance
+        if (rtviType === "bot-tts-started") {
+          setBotTranscript("");
+        }
+      } catch (e) {
+        console.warn("[HindiVoice] Failed to parse data:", e);
+      }
+    };
+
+    room.on(RoomEvent.DataReceived, handleDataReceived);
+
+    return () => {
+      room.off(RoomEvent.DataReceived, handleDataReceived);
+    };
+  }, [room, isRoomConnected]);
+
+  // Speaking detection via ActiveSpeakersChanged (primary source of truth)
+  useEffect(() => {
+    if (!room || !isRoomConnected) return;
+
+    const handleActiveSpeakersChanged = (speakers: any[]) => {
+      const agentSpeaking = speakers.some(s => s.identity?.includes("agent"));
+      setIsAgentSpeaking(agentSpeaking);
+    };
+
+    room.on(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakersChanged);
+
+    return () => {
+      room.off(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakersChanged);
+    };
+  }, [room, isRoomConnected]);
+
+  // Timer
   useEffect(() => {
     if (isRoomConnected) {
       const timer = setInterval(() => setSeconds((s) => s + 1), 1000);
@@ -248,16 +315,17 @@ const HindiVoiceUI = ({ seconds, setSeconds, error, onClose }: HindiVoiceUIProps
     onClose();
   }, [room, onClose]);
 
-  const isListening = assistantState === "listening" || (isRoomConnected && !assistantState);
-  const isSpeaking = assistantState === "speaking";
+  const isSpeaking = isAgentSpeaking;
   const amplitude = isSpeaking ? 1 : 0.45;
 
-  const statusText = (() => {
-    if (isRoomConnecting) return { main: "mello se ", highlight: "connect", suffix: " ho raha hai..." };
-    if (isMuted) return { main: "Psst...", highlight: "unmute", suffix: " so mello can hear you" };
-    if (assistantState === "thinking") return { main: "mello ", highlight: "soch rahi hai", suffix: "..." };
-    if (isSpeaking) return { main: "mello ", highlight: "bol rahi hai", suffix: "" };
-    return { main: "mello ", highlight: "sun rahi hai", suffix: " - bolo jo mann mein hai" };
+  // Display text: show transcript when available, otherwise show status
+  const displayText = (() => {
+    if (isRoomConnecting) return "Connecting...";
+    if (!agentConnected && isRoomConnected) return "Waiting for mello...";
+    if (isMuted) return "Mic is muted - unmute to talk";
+    if (botTranscript) return botTranscript;
+    if (isSpeaking) return "mello is speaking...";
+    return "mello is listening - speak your mind";
   })();
 
   return (
@@ -276,12 +344,10 @@ const HindiVoiceUI = ({ seconds, setSeconds, error, onClose }: HindiVoiceUIProps
       </div>
 
       <div className="mt-3 flex flex-1 flex-col justify-center">
-        <div className="flex flex-1 items-center justify-center px-1 py-1">
+        <div className="flex flex-1 items-center justify-center px-1 py-1 overflow-y-auto">
           <div className="max-w-sm text-center sm:max-w-md lg:max-w-lg">
-            <div className="rounded-2xl py-2 text-gray-500">
-              {statusText.main}
-              <span className={isMuted ? "text-red-500" : "text-[#ff9933]"}>{statusText.highlight}</span>
-              {statusText.suffix}
+            <div className="rounded-2xl py-2 text-gray-600 text-lg leading-relaxed">
+              {displayText}
             </div>
           </div>
         </div>
@@ -294,7 +360,7 @@ const HindiVoiceUI = ({ seconds, setSeconds, error, onClose }: HindiVoiceUIProps
           )}
 
           <div className="mx-auto mt-2 w-fit rounded-full bg-orange-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-orange-700 sm:text-xs">
-            {isRoomConnecting ? "connecting" : assistantState || "listening"}
+            {isRoomConnecting ? "connecting" : !agentConnected ? "waiting" : isSpeaking ? "speaking" : "listening"}
           </div>
         </div>
       </div>
