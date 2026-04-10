@@ -1,4 +1,4 @@
-name: Build and Deploy Hindi Agent
+name: Build and Deploy Hindi agent
 
 on:
   push:
