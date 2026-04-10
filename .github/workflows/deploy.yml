@@ -1,0 +1,50 @@
+name: Build and Deploy Hindi Agent to AWS
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'sarvam_hindi_agent/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-2
+  ECR_REGISTRY: 049559536960.dkr.ecr.ap-south-2.amazonaws.com
+  ECR_REPOSITORY: mello/hindiagent
+  IMAGE_TAG: latest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      run: |
+        aws ecr get-login-password --region $AWS_REGION \
+        | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+    - name: Build Docker image
+      run: |
+        docker build -t hindiagent ./sarvam_hindi_agent
+
+    - name: Tag Docker image
+      run: |
+        docker tag hindiagent:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Push Docker image to ECR
+      run: |
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Done
+      run: echo "Docker image pushed to AWS ECR successfully!"
