@@ -3,8 +3,6 @@ name: Build and Deploy Hindi Agent to AWS
 on:
   push:
     branches: [ main, feature/sarvamai ]
-    paths:
-      - 'sarvam_hindi_agent/**'
   workflow_dispatch:
 
 env:
