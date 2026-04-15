@@ -25,7 +25,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.sarvam.stt import SarvamSTTService, SarvamSTTSettings
 from pipecat.services.sarvam.tts import SarvamTTSService, SarvamTTSSettings
-from pipecat.services.azure.llm import AzureLLMService, AzureLLMSettings
+from pipecat.services.azure.llm import BedrockLLMService, AzureLLMSettings
 from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
 
 # Emoji pattern to strip from TTS input
@@ -155,15 +155,12 @@ async def main(room_name: str):
     )
 
     # Azure OpenAI LLM
-    llm = AzureLLMService(
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
-        settings=AzureLLMSettings(
-            model=os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-5-chat"),
-        )
+    llm = BedrockLLMService(
+    region=os.getenv("AWS_REGION"),
+    access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+    secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    model_id=os.getenv("AWS_MODEL_ID"),
     )
-
     # Sarvam TTS - Hindi Female Voice (empathetic)
     tts = SarvamTTSService(
         api_key=os.getenv("SARVAM_API_KEY"),
@@ -184,15 +181,12 @@ async def main(room_name: str):
 
     # Build pipeline: Audio In → STT → LLM → EmojiStripper → TTS → Audio Out
     pipeline = Pipeline([
-        transport.input(),
-        stt,
-        context_aggregator.user(),
-        llm,
-        emoji_stripper,
-        tts,
-        transport.output(),
-        context_aggregator.assistant(),
-    ])
+    transport.input(),
+    stt,
+    llm,
+    emoji_stripper,
+    tts,
+    transport.output(),])
 
     task = PipelineTask(
         pipeline,
